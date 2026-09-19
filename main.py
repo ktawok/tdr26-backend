@@ -87,14 +87,27 @@ async def ping():
     return {"status": "ok", "message": "Бот ТДР-26 работает 24/7"}
 
 
+from config import SUPER_ADMINS, EDITORS
+
 @app.get("/api/user_info")
-async def get_user_info(user_id: int):
-    if user_id in config.SUPER_ADMINS:
+async def get_user_info(user_id: str):
+    # Преобразуем входящий ID в число и строку для надежной проверки
+    try:
+        uid_int = int(user_id)
+    except ValueError:
+        uid_int = None
+    uid_str = str(user_id)
+
+    # Проверяем наличие ID в списках из config.py
+    is_super = (uid_int in SUPER_ADMINS) or (uid_str in SUPER_ADMINS)
+    is_editor = (uid_int in EDITORS) or (uid_str in EDITORS)
+
+    if is_super:
         return {"role": "superadmin", "can_edit": True}
-    role = await database.get_user_role(user_id)
-    if not role:
-        raise HTTPException(status_code=403, detail="Access denied")
-    return {"role": role, "can_edit": role in ['editor', 'superadmin']}
+    elif is_editor:
+        return {"role": "editor", "can_edit": True}
+    else:
+        return {"role": "viewer", "can_edit": False}
 
 
 @app.get("/api/schedule")
