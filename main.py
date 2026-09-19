@@ -48,7 +48,12 @@ async def cmd_start(message: types.Message):
         await message.answer("Нажмите Открыть Портал")
         return
 
-    
+    keyboard = ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="Зайти как наблюдатель, а так кнопка левее", web_app=WebAppInfo(url=config.WEBAPP_URL))]
+        ],
+        resize_keyboard=True
+    )
     
     await message.answer(
         f"Привет, {message.from_user.first_name}!\n"
@@ -76,6 +81,7 @@ async def add_editor_cmd(message: types.Message):
 async def ping():
     return {"status": "ok", "message": "Бот ТДР-26 работает 24/7"}
 
+@app.get("/api/user_info")
 @app.get("/api/user_info")
 async def get_user_info(user_id: str):
     # Преобразуем ID в число и строку, чтобы избежать ошибок с типами
