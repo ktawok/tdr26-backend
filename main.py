@@ -47,7 +47,7 @@ async def cmd_start(message: types.Message):
         await database.add_user(user_id, username, "superadmin")
 
     if not await check_access(user_id):
-        await message.answer("❌ Доступ запрещен. Бот работает только для студентов группы ТДР-26 МГРИ.")
+        await message.answer("Нажмите Открыть Портал")
         return
 
     keyboard = ReplyKeyboardMarkup(
