@@ -1,6 +1,6 @@
 # config.py
 
-BOT_TOKEN = "8887932767:AAGOQ-BZJXyk3g71SIgX-KHP2qC73ggR7Ww"
+BOT_TOKEN = "8887932767:AAFDzBltllyCYKjwyMGJEDGItPHJ4Bz1NmU"
 
 # Список Telegram ID главных админов (Ты и твои доверенные лица)
 SUPER_ADMINS = [1788867885, "1788867885"]
