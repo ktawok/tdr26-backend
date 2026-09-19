@@ -1,15 +1,22 @@
-import sqlite3
-from datetime import datetime
-from typing import Optional
-from fastapi import FastAPI, HTTPException
+# main.py
+import asyncio
+import logging
+from fastapi import FastAPI, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+import uvicorn
+from aiogram import Bot, Dispatcher, types
+from aiogram.filters import CommandStart, Command
+from aiogram.types import WebAppInfo, ReplyKeyboardMarkup, KeyboardButton
 
 import config
+import database
+import parser_mmis
 
-app = FastAPI(title="TDR-26 Homework API")
+logging.basicConfig(level=logging.INFO)
 
-# Разрешаем запросы с фронтенда GitHub Pages
+app = FastAPI()
+
+# Разрешаем CORS для GitHub Pages
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -18,160 +25,147 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-DB_NAME = getattr(config, "DB_NAME", "bot_database.db")
+bot = Bot(token=config.BOT_TOKEN)
+dp = Dispatcher()
 
+# --- ТЕЛЕГРАМ БОТ ---
 
-# Инициализация базы данных (создаем таблицы для ДЗ и Логов)
-def init_db():
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS homework (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            subject TEXT NOT NULL,
-            deadline TEXT NOT NULL,
-            description TEXT NOT NULL,
-            type TEXT NOT NULL DEFAULT 'dz'
-        )
-    """)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS logs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT,
-            action TEXT,
-            timestamp TEXT
-        )
-    """)
-    conn.commit()
-    conn.close()
+async def check_access(user_id: int) -> bool:
+    if user_id in config.SUPER_ADMINS:
+        return True
+    role = await database.get_user_role(user_id)
+    return role is not None
 
-init_db()
+@dp.message(CommandStart())
+async def cmd_start(message: types.Message):
+    user_id = message.from_user.id
+    username = message.from_user.username or message.from_user.first_name
 
-
-# --- Модели данных (как ожидает твой фронтенд) ---
-class AddHomeworkRequest(BaseModel):
-    id: Optional[int] = None
-    subject: str
-    deadline: str
-    description: str
-    type: str
-    user_id: str
-    username: str
-
-class DeleteHomeworkRequest(BaseModel):
-    hw_id: int
-    user_id: str
-    username: str
-
-
-# --- Та самая функция проверки прав (теперь видит эдиторов) ---
-def check_permissions(user_id: str):
-    try:
-        uid_int = int(user_id)
-    except (ValueError, TypeError):
-        uid_int = None
-    uid_str = str(user_id)
-
-    super_admins = getattr(config, "SUPER_ADMINS", [])
-    editors = getattr(config, "EDITORS", [])
-
-    if (uid_int in super_admins) or (uid_str in super_admins):
-        return "superadmin", True
-    if (uid_int in editors) or (uid_str in editors):
-        return "editor", True
+    if user_id in config.SUPER_ADMINS:
+        await database.add_user(user_id, username, "superadmin")
     
-    return "viewer", False
+    if not await check_access(user_id):
+        await message.answer("❌ Доступ запрещен. Бот работает только для студентов группы ТДР-26 МГРИ.")
+        return
 
+    keyboard = ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="🎓 Открыть портал ТДР-26", web_app=WebAppInfo(url=config.WEBAPP_URL))]
+        ],
+        resize_keyboard=True
+    )
+    
+    await message.answer(
+        f"Привет, {message.from_user.first_name}!\n"
+        f"Добро пожаловать в портал группы {config.GROUP_NAME} {config.UNIVERSITY}.\n\n"
+        "Нажми кнопку ниже, чтобы открыть расписание, ДЗ, сессию и логи.",
+        reply_markup=keyboard
+    )
 
-# --- ЭНДПОИНТЫ (Все твои оригинальные пути возвращены) ---
+@dp.message(Command("add_editor"))
+async def add_editor_cmd(message: types.Message):
+    if message.from_user.id not in config.SUPER_ADMINS:
+        return
+    try:
+        args = message.text.split()
+        target_id = int(args[1])
+        await database.add_user(target_id, f"user_{target_id}", "editor")
+        await database.log_action(message.from_user.id, message.from_user.username, f"Выдал права редактора ID {target_id}")
+        await message.answer(f"✅ Пользователю {target_id} выданы права на редактирование.")
+    except Exception:
+        await message.answer("Использование: `/add_editor <TELEGRAM_ID>`")
+
+# --- API ДЛЯ MINI APP ---
+
+@app.get("/ping")
+async def ping():
+    return {"status": "ok", "message": "Бот ТДР-26 работает 24/7"}
 
 @app.get("/api/user_info")
 async def get_user_info(user_id: str):
-    role, can_edit = check_permissions(user_id)
-    return {"role": role, "can_edit": can_edit}
+    # Преобразуем ID в число и строку, чтобы избежать ошибок с типами
+    try:
+        uid_int = int(user_id)
+    except ValueError:
+        uid_int = None
+    uid_str = str(user_id)
 
+    # 1. Проверка на Главного Админа (из config.py)
+    if (uid_int in config.SUPER_ADMINS) or (uid_str in config.SUPER_ADMINS):
+        return {"role": "superadmin", "can_edit": True}
+
+    # 2. Проверка на Редактора (из config.py) — ТЕПЕРЬ РАБОТАЕТ!
+    if hasattr(config, 'EDITORS') and ((uid_int in config.EDITORS) or (uid_str in config.EDITORS)):
+        return {"role": "editor", "can_edit": True}
+
+    # 3. Если пользователя нет в конфиге, проверяем роль в базе данных
+    role = await database.get_user_role(uid_int if uid_int is not None else user_id)
+    if not role:
+        role = "viewer"
+
+    return {"role": role, "can_edit": role in ['editor', 'superadmin']}
+
+@app.get("/api/schedule")
+async def get_schedule(date: str):
+    pairs = parser_mmis.get_mgri_schedule(date)
+    all_hw = await database.get_homework('dz')
+    
+    # Привязываем ДЗ к парам по дате
+    return {"pairs": pairs, "homework": all_hw}
 
 @app.get("/api/homework")
-async def get_homework(type: str = "dz"):
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    # Возвращаем массивом (id, subject, deadline, description), как ждет JS
-    cursor.execute("SELECT id, subject, deadline, description FROM homework WHERE type = ?", (type,))
-    rows = cursor.fetchall()
-    conn.close()
-    return rows
-
+async def get_hw(type: str = 'dz'):
+    return await database.get_homework(type)
 
 @app.post("/api/homework/add")
-async def add_homework(data: AddHomeworkRequest):
-    role, can_edit = check_permissions(data.user_id)
+async def add_hw(data: dict):
+    user_id = data.get("user_id")
+    username = data.get("username", "Неизвестный")
     
-    if not can_edit:
-        raise HTTPException(status_code=403, detail="Нет прав на добавление/редактирование")
-
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-
-    if data.id:
-        cursor.execute("""
-            UPDATE homework SET subject=?, deadline=?, description=?, type=? WHERE id=?
-        """, (data.subject, data.deadline, data.description, data.type, data.id))
-        action_text = f"Отредактировал(а) {data.type}: {data.subject}"
-    else:
-        cursor.execute("""
-            INSERT INTO homework (subject, deadline, description, type) VALUES (?, ?, ?, ?)
-        """, (data.subject, data.deadline, data.description, data.type))
-        action_text = f"Добавил(а) {data.type}: {data.subject}"
+    role = await database.get_user_role(user_id)
+    if user_id not in config.SUPER_ADMINS and role not in ['editor', 'superadmin']:
+        raise HTTPException(status_code=403, detail="Нет прав на редактирование")
     
-    # Сохраняем действие в логи
-    time_now = datetime.now().strftime("%d.%m.%Y %H:%M")
-    cursor.execute("INSERT INTO logs (username, action, timestamp) VALUES (?, ?, ?)", 
-                   (data.username, action_text, time_now))
-    
-    conn.commit()
-    conn.close()
+    await database.add_homework(
+        subject=data['subject'],
+        deadline=data['deadline'],
+        description=data['description'],
+        hw_type=data.get('type', 'dz'),
+        user_id=user_id,
+        username=username
+    )
     return {"status": "success"}
-
 
 @app.post("/api/homework/delete")
-async def delete_homework(data: DeleteHomeworkRequest):
-    role, can_edit = check_permissions(data.user_id)
+async def delete_hw(data: dict):
+    user_id = data.get("user_id")
+    username = data.get("username", "Неизвестный")
+    hw_id = data.get("hw_id")
     
-    if not can_edit:
+    role = await database.get_user_role(user_id)
+    if user_id not in config.SUPER_ADMINS and role not in ['editor', 'superadmin']:
         raise HTTPException(status_code=403, detail="Нет прав на удаление")
-
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
     
-    # Получаем название предмета для записи в логи перед удалением
-    cursor.execute("SELECT subject, type FROM homework WHERE id=?", (data.hw_id,))
-    row = cursor.fetchone()
-    if row:
-        subject, hw_type = row[0], row[1]
-        cursor.execute("DELETE FROM homework WHERE id=?", (data.hw_id,))
-        
-        # Пишем в логи
-        action_text = f"Удалил(а) {hw_type}: {subject}"
-        time_now = datetime.now().strftime("%d.%m.%Y %H:%M")
-        cursor.execute("INSERT INTO logs (username, action, timestamp) VALUES (?, ?, ?)", 
-                       (data.username, action_text, time_now))
-        
-    conn.commit()
-    conn.close()
+    await database.delete_homework(hw_id, user_id, username)
     return {"status": "success"}
 
-
 @app.get("/api/logs")
-async def get_logs(user_id: str):
-    role, can_edit = check_permissions(user_id)
-    # Если хочешь скрыть логи от обычных зрителей, раскомментируй следующие 2 строки:
-    # if not can_edit:
-    #     raise HTTPException(status_code=403, detail="Логи только для редакторов")
+async def get_logs(user_id: int):
+    if not await check_access(user_id):
+        raise HTTPException(status_code=403, detail="Access denied")
+    return await database.get_all_logs()
 
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    # Возвращаем массивом (username, action, timestamp)
-    cursor.execute("SELECT username, action, timestamp FROM logs ORDER BY id DESC LIMIT 50")
-    rows = cursor.fetchall()
-    conn.close()
-    return rows
+async def main():
+    await database.init_db()
+    # Запускаем бота и веб-сервер API одновременно
+    config_server = uvicorn.Config(app, host="0.0.0.0", port=8000, log_level="info")
+    server = uvicorn.Server(config_server)
+    
+    print(">>> Бот и API запущены на сервере <<<")
+    await asyncio.gather(
+        dp.start_polling(bot),
+        server.serve()
+    )
+
+if __name__ == "__main__":
+    asyncio.run(main())
