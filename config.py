@@ -21,7 +21,7 @@ SUPER_ADMINS = [
 ]
 
 # Список Telegram ID редакторов
-
+EDITORS = []
 
 # Ссылка на твой GitHub Pages (со слэшем на конце)
 WEBAPP_URL = "https://ktawok.github.io/tdr26-mini-app/"
