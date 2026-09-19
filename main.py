@@ -45,15 +45,10 @@ async def cmd_start(message: types.Message):
         await database.add_user(user_id, username, "superadmin")
     
     if not await check_access(user_id):
-        await message.answer("❌ Доступ запрещен. Бот работает только для студентов группы ТДР-26 МГРИ.")
+        await message.answer("Нажмите Открыть Портал")
         return
 
-    keyboard = ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="🎓 Открыть портал ТДР-26", web_app=WebAppInfo(url=config.WEBAPP_URL))]
-        ],
-        resize_keyboard=True
-    )
+    
     
     await message.answer(
         f"Привет, {message.from_user.first_name}!\n"
