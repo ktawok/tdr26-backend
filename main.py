@@ -1,6 +1,7 @@
 import sqlite3
+from datetime import datetime
 from typing import Optional
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -8,7 +9,7 @@ import config
 
 app = FastAPI(title="TDR-26 Homework API")
 
-# Разрешаем запросы (CORS) с фронтенда GitHub Pages
+# Разрешаем запросы с фронтенда GitHub Pages
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -20,7 +21,7 @@ app.add_middleware(
 DB_NAME = getattr(config, "DB_NAME", "bot_database.db")
 
 
-# Инициализация базы данных
+# Инициализация базы данных (создаем таблицы для ДЗ и Логов)
 def init_db():
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
@@ -28,27 +29,43 @@ def init_db():
         CREATE TABLE IF NOT EXISTS homework (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             subject TEXT NOT NULL,
+            deadline TEXT NOT NULL,
             description TEXT NOT NULL,
-            deadline TEXT NOT NULL
+            type TEXT NOT NULL DEFAULT 'dz'
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT,
+            action TEXT,
+            timestamp TEXT
         )
     """)
     conn.commit()
     conn.close()
 
-
 init_db()
 
 
-# Pydantic-модель входящих данных ДЗ
-class HomeworkItem(BaseModel):
+# --- Модели данных (как ожидает твой фронтенд) ---
+class AddHomeworkRequest(BaseModel):
     id: Optional[int] = None
     subject: str
+    deadline: str
     description: str
-    deadline: str  # Формат: YYYY-MM-DD
+    type: str
+    user_id: str
+    username: str
+
+class DeleteHomeworkRequest(BaseModel):
+    hw_id: int
+    user_id: str
+    username: str
 
 
-# Единая функция проверки прав доступа (Проверяет и числа, и строки)
-def get_user_role_and_permissions(user_id: str | int):
+# --- Та самая функция проверки прав (теперь видит эдиторов) ---
+def check_permissions(user_id: str):
     try:
         uid_int = int(user_id)
     except (ValueError, TypeError):
@@ -58,93 +75,103 @@ def get_user_role_and_permissions(user_id: str | int):
     super_admins = getattr(config, "SUPER_ADMINS", [])
     editors = getattr(config, "EDITORS", [])
 
-    # 1. Главный админ
     if (uid_int in super_admins) or (uid_str in super_admins):
         return "superadmin", True
-
-    # 2. Редактор
     if (uid_int in editors) or (uid_str in editors):
         return "editor", True
-
-    # 3. Обычный зритель
+    
     return "viewer", False
 
 
-# 1. Информация о пользователе
+# --- ЭНДПОИНТЫ (Все твои оригинальные пути возвращены) ---
+
 @app.get("/api/user_info")
 async def get_user_info(user_id: str):
-    role, can_edit = get_user_role_and_permissions(user_id)
+    role, can_edit = check_permissions(user_id)
     return {"role": role, "can_edit": can_edit}
 
 
-# 2. Получение списка всех ДЗ
 @app.get("/api/homework")
-async def get_homework():
+async def get_homework(type: str = "dz"):
     conn = sqlite3.connect(DB_NAME)
-    conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
-    cursor.execute("SELECT id, subject, description, deadline FROM homework")
+    # Возвращаем массивом (id, subject, deadline, description), как ждет JS
+    cursor.execute("SELECT id, subject, deadline, description FROM homework WHERE type = ?", (type,))
     rows = cursor.fetchall()
     conn.close()
+    return rows
 
-    return [dict(row) for row in rows]
 
-
-# 3. Сохранение / Редактирование ДЗ (Доступно и Главным Админам, и Эдиторам)
-@app.post("/api/homework")
-async def save_homework(item: HomeworkItem, user_id: str = Query(...)):
-    role, can_edit = get_user_role_and_permissions(user_id)
-
+@app.post("/api/homework/add")
+async def add_homework(data: AddHomeworkRequest):
+    role, can_edit = check_permissions(data.user_id)
+    
     if not can_edit:
-        raise HTTPException(
-            status_code=403, detail="У вас нет прав на редактирование заданий."
-        )
+        raise HTTPException(status_code=403, detail="Нет прав на добавление/редактирование")
 
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
 
-    if item.id:
-        # Редактирование существующей записи
-        cursor.execute(
-            """
-            UPDATE homework
-            SET subject = ?, description = ?, deadline = ?
-            WHERE id = ?
-        """,
-            (item.subject, item.description, item.deadline, item.id),
-        )
-        print(f"Пользователь {user_id} ({role}) обновил ДЗ с ID {item.id}")
+    if data.id:
+        cursor.execute("""
+            UPDATE homework SET subject=?, deadline=?, description=?, type=? WHERE id=?
+        """, (data.subject, data.deadline, data.description, data.type, data.id))
+        action_text = f"Отредактировал(а) {data.type}: {data.subject}"
     else:
-        # Создание новой записи
-        cursor.execute(
-            """
-            INSERT INTO homework (subject, description, deadline)
-            VALUES (?, ?, ?)
-        """,
-            (item.subject, item.description, item.deadline),
-        )
-        print(f"Пользователь {user_id} ({role}) создал новое ДЗ")
-
+        cursor.execute("""
+            INSERT INTO homework (subject, deadline, description, type) VALUES (?, ?, ?, ?)
+        """, (data.subject, data.deadline, data.description, data.type))
+        action_text = f"Добавил(а) {data.type}: {data.subject}"
+    
+    # Сохраняем действие в логи
+    time_now = datetime.now().strftime("%d.%m.%Y %H:%M")
+    cursor.execute("INSERT INTO logs (username, action, timestamp) VALUES (?, ?, ?)", 
+                   (data.username, action_text, time_now))
+    
     conn.commit()
     conn.close()
-    return {"status": "success", "message": "Задание успешно сохранено"}
+    return {"status": "success"}
 
 
-# 4. Удаление ДЗ
-@app.delete("/api/homework/{item_id}")
-async def delete_homework(item_id: int, user_id: str = Query(...)):
-    role, can_edit = get_user_role_and_permissions(user_id)
-
+@app.post("/api/homework/delete")
+async def delete_homework(data: DeleteHomeworkRequest):
+    role, can_edit = check_permissions(data.user_id)
+    
     if not can_edit:
-        raise HTTPException(
-            status_code=403, detail="У вас нет прав на удаление заданий."
-        )
+        raise HTTPException(status_code=403, detail="Нет прав на удаление")
 
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
-    cursor.execute("DELETE FROM homework WHERE id = ?", (item_id,))
+    
+    # Получаем название предмета для записи в логи перед удалением
+    cursor.execute("SELECT subject, type FROM homework WHERE id=?", (data.hw_id,))
+    row = cursor.fetchone()
+    if row:
+        subject, hw_type = row[0], row[1]
+        cursor.execute("DELETE FROM homework WHERE id=?", (data.hw_id,))
+        
+        # Пишем в логи
+        action_text = f"Удалил(а) {hw_type}: {subject}"
+        time_now = datetime.now().strftime("%d.%m.%Y %H:%M")
+        cursor.execute("INSERT INTO logs (username, action, timestamp) VALUES (?, ?, ?)", 
+                       (data.username, action_text, time_now))
+        
     conn.commit()
     conn.close()
+    return {"status": "success"}
 
-    print(f"Пользователь {user_id} ({role}) удалил ДЗ с ID {item_id}")
-    return {"status": "success", "message": "Задание удалено"}
+
+@app.get("/api/logs")
+async def get_logs(user_id: str):
+    role, can_edit = check_permissions(user_id)
+    # Если хочешь скрыть логи от обычных зрителей, раскомментируй следующие 2 строки:
+    # if not can_edit:
+    #     raise HTTPException(status_code=403, detail="Логи только для редакторов")
+
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    # Возвращаем массивом (username, action, timestamp)
+    cursor.execute("SELECT username, action, timestamp FROM logs ORDER BY id DESC LIMIT 50")
+    rows = cursor.fetchall()
+    conn.close()
+    return rows
