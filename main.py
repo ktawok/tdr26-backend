@@ -91,23 +91,27 @@ from config import SUPER_ADMINS, EDITORS
 
 @app.get("/api/user_info")
 async def get_user_info(user_id: str):
-    # Преобразуем входящий ID в число и строку для надежной проверки
+    # Преобразуем ID в число и строку, чтобы избежать ошибок с типами
     try:
         uid_int = int(user_id)
     except ValueError:
         uid_int = None
     uid_str = str(user_id)
 
-    # Проверяем наличие ID в списках из config.py
-    is_super = (uid_int in SUPER_ADMINS) or (uid_str in SUPER_ADMINS)
-    is_editor = (uid_int in EDITORS) or (uid_str in EDITORS)
-
-    if is_super:
+    # 1. Проверка на Главного Админа (из config.py)
+    if (uid_int in config.SUPER_ADMINS) or (uid_str in config.SUPER_ADMINS):
         return {"role": "superadmin", "can_edit": True}
-    elif is_editor:
+
+    # 2. Проверка на Редактора (из config.py) — ТЕПЕРЬ РАБОТАЕТ!
+    if hasattr(config, 'EDITORS') and ((uid_int in config.EDITORS) or (uid_str in config.EDITORS)):
         return {"role": "editor", "can_edit": True}
-    else:
-        return {"role": "viewer", "can_edit": False}
+
+    # 3. Если пользователя нет в конфиге, проверяем роль в базе данных
+    role = await database.get_user_role(uid_int if uid_int is not None else user_id)
+    if not role:
+        role = "viewer"
+
+    return {"role": role, "can_edit": role in ['editor', 'superadmin']}
 
 
 @app.get("/api/schedule")
